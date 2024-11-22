@@ -1,6 +1,12 @@
 import java.io.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.StandardCharsets;
 import javax.swing.*;
 
 
@@ -15,8 +21,15 @@ public class ChatClient {
     // Se for necessário adicionar variáveis ao objecto Client, devem
     // ser colocadas aqui
 
+    // A pre-allocated buffer for the received data
+    static private final ByteBuffer buffer = ByteBuffer.allocate(16384);
 
+    // Decoder for incoming text -- assume UTF-8
+    static private final Charset charset = Charset.forName("UTF8");
+    static private final CharsetDecoder decoder = charset.newDecoder();
 
+    // Socket Channel
+    SocketChannel sc;
 
     // Método a usar para acrescentar uma string à caixa de texto
     // * NÃO MODIFICAR *
@@ -61,8 +74,9 @@ public class ChatClient {
         // Se for necessário adicionar código de inicialização ao
         // construtor, deve ser colocado aqui
 
-
-
+        sc = SocketChannel.open();
+        InetSocketAddress isa = new InetSocketAddress(server, port);
+        sc.connect(isa);
     }
 
 
@@ -70,18 +84,17 @@ public class ChatClient {
     // na caixa de entrada
     public void newMessage(String message) throws IOException {
         // PREENCHER AQUI com código que envia a mensagem ao servidor
-
-
-
+        buffer.clear();
+        buffer.put(message.getBytes(charset));
+        buffer.flip();
+        while (buffer.hasRemaining()) {
+            sc.write(buffer);
+        }
     }
 
 
     // Método principal do objecto
     public void run() throws IOException {
-        // PREENCHER AQUI
-
-
-
     }
 
 
