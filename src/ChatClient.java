@@ -3,10 +3,16 @@ import java.awt.*;
 import java.awt.event.*;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import javax.swing.*;
 
 
@@ -29,7 +35,13 @@ public class ChatClient {
     static private final CharsetDecoder decoder = charset.newDecoder();
 
     // Socket Channel
-    SocketChannel sc;
+    private SocketChannel sc;
+
+    // Selector
+    private Selector selector;
+
+    // Messages
+    private ConcurrentLinkedQueue<String> messageQueue = new ConcurrentLinkedQueue<>();
 
     // Método a usar para acrescentar uma string à caixa de texto
     // * NÃO MODIFICAR *
@@ -73,10 +85,12 @@ public class ChatClient {
 
         // Se for necessário adicionar código de inicialização ao
         // construtor, deve ser colocado aqui
-
+        selector = Selector.open();
         sc = SocketChannel.open();
+        sc.configureBlocking(false);
         InetSocketAddress isa = new InetSocketAddress(server, port);
         sc.connect(isa);
+        sc.register(selector, SelectionKey.OP_CONNECT);
     }
 
 
@@ -84,17 +98,77 @@ public class ChatClient {
     // na caixa de entrada
     public void newMessage(String message) throws IOException {
         // PREENCHER AQUI com código que envia a mensagem ao servidor
-        buffer.clear();
-        buffer.put(message.getBytes(charset));
-        buffer.flip();
-        while (buffer.hasRemaining()) {
-            sc.write(buffer);
-        }
+        messageQueue.offer(message+"\n");
     }
 
+    public void readMessage() throws IOException {
+        buffer.clear();
+        sc.read(buffer);
+        buffer.flip();
+
+        // If no data, close the connection
+        if (buffer.limit() == 0) {
+            return;
+        }
+
+        // Decode and print the message to stdout
+        String message = decoder.decode(buffer).toString();
+        System.out.println(message);
+        printMessage(message+"\n");
+    }
 
     // Método principal do objecto
     public void run() throws IOException {
+        try {
+            while (true) {
+                int num = selector.select();
+
+                // If we don't have any activity, loop around and wait again
+                if (num == 0) {
+                    continue;
+                }
+                Set<SelectionKey> keys = selector.selectedKeys();
+                Iterator<SelectionKey> it = keys.iterator();
+
+                SocketChannel channel;
+
+                while (it.hasNext()) {
+                    SelectionKey key = it.next();
+                    it.remove();
+
+                    channel = (SocketChannel) key.channel();
+
+                    if (key.isConnectable()) {
+                        if (channel.isConnectionPending()) {
+                            channel.finishConnect();
+                        }
+                        channel.register(selector, SelectionKey.OP_WRITE);
+                    } else if (key.isReadable()) {
+                        readMessage();
+                    } else if (key.isWritable()) {
+                        String message = messageQueue.poll();
+                        buffer.clear();
+                        if (message != null) {
+                            buffer.put(message.getBytes(charset));
+                            buffer.flip();
+                            while (buffer.hasRemaining()) {
+                                sc.write(buffer);
+                            }
+                        }
+                        channel.register(key.selector(), SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+                    }
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                if (sc != null) sc.close();
+                if (selector != null) selector.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
     }
 
 
