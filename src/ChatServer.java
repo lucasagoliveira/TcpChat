@@ -18,6 +18,7 @@ class User {
     private String room_name;
     public static Set<String> userNames = new HashSet<>();
     public static Map<SocketChannel, User> users = new HashMap<>();
+    public static Map<String, User> registeredUsers = new HashMap<>();
 
     User(SocketChannel s) {
         name = null;
@@ -50,6 +51,10 @@ class User {
         name = newName;
         userNames.add(name);
         userNames.remove(aux);
+        if (state != States.init) {
+            registeredUsers.remove(aux);
+        }
+        registeredUsers.put(name, this);
         if (state == States.init) state = States.outside;
         return aux; // Can return NULL or the previous name if the user has already picked one before.
     }
@@ -68,6 +73,15 @@ class User {
         }
         room_name = null;
         state = States.outside;
+    }
+
+    void remove() throws Exception {
+        if (state == States.inside)
+            Room.rooms.get(room_name).disconnect(this);
+        registeredUsers.remove(name);
+        users.remove(socket);
+        userNames.remove(name);
+        socket.close();
     }
 }
 
@@ -114,6 +128,7 @@ class Room {
 
 public class ChatServer {
     // A pre-allocated buffer for the received data
+    private static Map<SocketChannel, StringBuilder> partialInputs = new HashMap<>();
     static private final ByteBuffer buffer = ByteBuffer.allocate(16384);
 
     // Decoder for incoming text -- assume UTF-8
@@ -134,7 +149,7 @@ public class ChatServer {
 
     public static void broadcast(String message, User user) {
         if (user.getRoomName() == null) return;
-        for (var u : Room.rooms.get(user.getRoomName()).getUsers()) {
+        for (User u : Room.rooms.get(user.getRoomName()).getUsers()) {
             try {
                 sendMessage(message, u);
             } catch (IOException e) {
@@ -145,7 +160,7 @@ public class ChatServer {
 
     public static void broadcastToRest(String message, User user) {
         if (user.getRoomName() == null) return;
-        for (var u : Room.rooms.get(user.getRoomName()).getUsers()) {
+        for (User u : Room.rooms.get(user.getRoomName()).getUsers()) {
             if (user == u) continue;
             try {
                 sendMessage(message, u);
@@ -163,6 +178,7 @@ public class ChatServer {
         }
     }
 
+    // Valid commands
     public static void join(String roomName, User user) {
         if (user.getState() == States.inside) {
             broadcastToRest("LEFT " + user.getName(), user);
@@ -215,11 +231,12 @@ public class ChatServer {
         }
         reply("BYE", user);
         try {
-            User.users.remove(user.getSocket());
-            user.getSocket().close();
+            user.remove();
             user = null;
         } catch (IOException e) {
             System.err.println(e.getMessage());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -228,6 +245,16 @@ public class ChatServer {
             broadcast("MESSAGE " + user.getName() + " " + message, user);
         } else {
             reply("ERROR", user);
+        }
+    }
+
+    public static void priv(String message,  String receiver, User user) {
+        User uReceiver = User.registeredUsers.get(receiver);
+        if ( uReceiver == null || user.getState() == States.init) {
+            reply("ERROR", user);
+        } else {
+            reply("PRIVATE " + user.getName() + " " + message, uReceiver);
+            reply("OK", user);
         }
     }
 
@@ -249,8 +276,13 @@ public class ChatServer {
             leave(user);
         } else if (line.startsWith("/bye")) {
             bye(user);
+        } else if (line.startsWith("/priv")) {
+            args = line.split(" ");
+            if (args[1] == null || args[2] == null)
+                reply("ERROR", user);
+            priv(args[2], args[1], user);
         } else if (line.startsWith("/")) {
-            reply("ERROR", user);
+            message(line.substring(1), user);
         } else {
             message(line, user);
         }
@@ -336,8 +368,9 @@ public class ChatServer {
                                 Socket s = null;
                                 try {
                                     s = sc.socket();
+                                    partialInputs.remove(sc);
                                     System.out.println("Closing connection to " + s);
-                                    s.close();
+                                    User.users.get(sc).remove();
                                 } catch (IOException ie) {
                                     System.err.println("Error closing socket " + s + ": " + ie);
                                 }
@@ -350,7 +383,8 @@ public class ChatServer {
                             key.cancel();
 
                             try {
-                                sc.close();
+                                partialInputs.remove(sc);
+                                User.users.get(sc).remove();
                             } catch (IOException ie2) {
                                 System.out.println(ie2);
                             }
@@ -368,34 +402,66 @@ public class ChatServer {
         }
     }
 
-
     // Just read the message from the socket and send it to stdout
     static private boolean processInput(SocketChannel sc) throws IOException {
         // Read the message to the buffer
+        System.out.println("check");
         buffer.clear();
         User user = User.users.get(sc);
-        sc.read(buffer);
-        buffer.flip();
+        int bytesRead = sc.read(buffer);
 
         // If no data, close the connection
-        if (buffer.limit() == 0) {
+        if (bytesRead == -1) {
+            StringBuilder partialInput = partialInputs.get(sc);
+            if (partialInput != null && partialInput.length() > 0) {
+                try {
+                    commands(partialInput.toString().trim(), user);
+                } catch (Exception e) {
+                    System.err.println("Error processing final partial input: " + e);
+                }
+            }
+            partialInputs.remove(sc);
             return false;
         }
+
+        if (bytesRead == 0) {
+            System.out.println("nothing");
+            return true;
+        }
+
+        System.out.println("read " + bytesRead);
+
+        buffer.flip();
 
         // Decode and print the message to stdout
         String message = decoder.decode(buffer).toString();
 
         try {
-            String[] inputs = message.split("\n");
-            for (String input : inputs) {
-                commands(input, user);
+            StringBuilder partialInput = partialInputs.computeIfAbsent(sc, k -> new StringBuilder());
+            partialInput.append(message);
+
+            while (partialInput.toString().contains("\n")) {
+                int newlineIndex = partialInput.indexOf("\n");
+
+                if (newlineIndex == -1) {
+                    break;
+                }
+
+                String completeLine = partialInput.substring(0, newlineIndex).trim();
+
+                // Process the complete line if it's not empty
+                if (!completeLine.isEmpty()) {
+                    commands(completeLine, user);
+                }
+
+                // Remove the processed line
+                partialInput.delete(0, newlineIndex + 1);
             }
+
+            partialInputs.put(sc, partialInput);
         } catch (Exception e) {
             System.err.println(e);
         }
-
-//        System.out.print(user.getName() + ": " + message);
-
         return true;
     }
 }

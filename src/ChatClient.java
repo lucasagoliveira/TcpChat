@@ -101,6 +101,33 @@ public class ChatClient {
         messageQueue.offer(message+"\n");
     }
 
+    public String processMessage(String message) {
+        String[] args;
+        if (message.startsWith("OK")) {
+            return "Success!";
+        } else if (message.startsWith("ERROR")) {
+            return "Error! That didn't work...";
+        } else if (message.startsWith("MESSAGE")) {
+            args = message.split(" ");
+            return args[1] + ": " + message.substring(message.indexOf(args[2]));
+        } else if (message.startsWith("PRIVATE")) {
+            args = message.split(" ");
+            return "Private message from " + args[1] + ": " + message.substring(message.indexOf(args[2]));
+        } else if (message.startsWith("NEWNICK")) {
+            args = message.split(" ");
+            return args[1] + " changed their name to " + args[2];
+        } else if (message.startsWith("JOINED")) {
+            args = message.split(" ");
+            return args[1] + " joined the chat.";
+        } else if (message.startsWith("LEFT")) {
+            args = message.split(" ");
+            return args[1] + " left the chat.";
+        } else if (message.startsWith("BYE")) {
+            return "You are now disconnected.";
+        } else
+            return "ERROR!";
+    }
+
     public void readMessage() throws IOException {
         buffer.clear();
         sc.read(buffer);
@@ -113,8 +140,21 @@ public class ChatClient {
 
         // Decode and print the message to stdout
         String message = decoder.decode(buffer).toString();
-        System.out.println(message);
+        message = processMessage(message);
         printMessage(message+"\n");
+    }
+
+    public String filter(String message) {
+        if (message.startsWith("/")) {
+            String temp = message.substring(1);
+            String[] validCommands = {"join", "leave", "nick", "priv", "bye"};
+            for (int i = 0; i < validCommands.length; i++) {
+                if (temp.startsWith(validCommands[i]))
+                    return message;
+            }
+            return "/"+message;
+        } else
+            return message;
     }
 
     // Método principal do objecto
@@ -149,6 +189,7 @@ public class ChatClient {
                         String message = messageQueue.poll();
                         buffer.clear();
                         if (message != null) {
+                            message = filter(message);
                             buffer.put(message.getBytes(charset));
                             buffer.flip();
                             while (buffer.hasRemaining()) {
